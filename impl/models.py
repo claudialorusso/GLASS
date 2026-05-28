@@ -3,14 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from torch_geometric.nn.norm import GraphNorm, GraphSizeNorm
-from torch_geometric.nn.glob.glob import global_mean_pool, global_add_pool, global_max_pool
+from torch_geometric.nn import global_mean_pool, global_add_pool, global_max_pool
 from .utils import pad2batch
 
 
 class Seq(nn.Module):
-    ''' 
-    An extension of nn.Sequential. 
-    Args: 
+    '''
+    An extension of nn.Sequential.
+    Args:
         modlist an iterable of modules to add.
     '''
     def __init__(self, modlist):
@@ -275,7 +275,7 @@ class EmbZGConv(nn.Module):
 class PoolModule(nn.Module):
     '''
     Modules used for pooling node embeddings to produce subgraph embeddings.
-    Args: 
+    Args:
         trans_fn: module to transfer node embeddings.
         pool_fn: module to pool node embeddings like global_add_pool.
     '''

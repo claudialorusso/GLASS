@@ -17,7 +17,7 @@ class BaseGraph(Data):
             x: node feature. For our used datasets, x is empty vector.
             subG_node: a matrix like [[0,2,3],[1,4,5],[6,7,-1]], whose i-th row contains the nodes in the i-th subgraph. -1 is for padding.
             subG_label: the target of subgraphs.
-            mask: of shape (number of subgraphs), type torch.long. mask[i]=0,1,2 if i-th subgraph is in the training set, validation set and test set respectively. 
+            mask: of shape (number of subgraphs), type torch.long. mask[i]=0,1,2 if i-th subgraph is in the training set, validation set and test set respectively.
         '''
         super(BaseGraph, self).__init__(x=x,
                                         edge_index=edge_index,
@@ -29,13 +29,16 @@ class BaseGraph(Data):
 
     def addDegreeFeature(self):
         # For GNN-seg only, use one-hot node degree as node features.
+        # one hot è un vettore di 0 dove l'unico 1 è in corrispondenza dell'id=grado del nodo. In questo modo, nodi che hanno lo stesso grado, saranno simili.
+        # viene fatto per evitare che un numero alto, assegnato ad una variabile degree, possa essere interpretato come MIGLIORE. Avere un vettore permette di
+        #rendere meno biased l'AI
         adj = torch.sparse_coo_tensor(self.edge_index, self.edge_attr,
                                       (self.x.shape[0], self.x.shape[0]))
         degree = torch.sparse.sum(adj, dim=1).to_dense().to(torch.int64)
         self.x = torch.cat((self.x, one_hot(degree).to(torch.float).reshape(
             self.x.shape[0], 1, -1)),
             dim=-1)
-    
+
     def addOneFeature(self):
         # For GNN-seg only, use one as node features.
         self.x = torch.cat(
@@ -124,7 +127,7 @@ def load_dataset(name: str):
         return BaseGraph(torch.empty(
             (len(node), 1, 0)), torch.from_numpy(edge),
                          torch.ones(edge.shape[1]), subG_pad, subGLabel, mask)
-    elif name in ["ppi_bp", "hpo_metab", "hpo_neuro", "em_user"]:
+    elif name in ["ppi_bp", "hpo_metab", "hpo_neuro", "em_user", "elliptic"]:
         multilabel = False
 
         # copied from https://github.com/mims-harvard/SubGNN/blob/main/SubGNN/subgraph_utils.py
@@ -171,11 +174,20 @@ def load_dataset(name: str):
                 train_sub_G_label = torch.tensor(train_sub_G_label).squeeze()
                 val_sub_G_label = torch.tensor(val_sub_G_label).squeeze()
                 test_sub_G_label = torch.tensor(test_sub_G_label).squeeze()
-
+            return (
+                train_sub_G,
+                train_sub_G_label,
+                val_sub_G,
+                val_sub_G_label,
+                test_sub_G,
+                test_sub_G_label,
+            )
+            """
             if len(val_mask) < len(test_mask):
                 return train_sub_G, train_sub_G_label, test_sub_G, test_sub_G_label, val_sub_G, val_sub_G_label
 
             return train_sub_G, train_sub_G_label, val_sub_G, val_sub_G_label, test_sub_G, test_sub_G_label
+            """
 
         if os.path.exists(
                 f"./dataset/{name}/train_sub_G.pt") and name != "hpo_neuro":

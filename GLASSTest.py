@@ -10,11 +10,11 @@ import numpy as np
 import time
 import random
 import yaml
-
+test_start = time.time()
 parser = argparse.ArgumentParser(description='')
 # Dataset settings
 parser.add_argument('--dataset', type=str, default='ppi_bp')
-# Node feature settings. 
+# Node feature settings.
 # deg means use node degree. one means use homogeneous embeddings.
 # nodeid means use pretrained node embeddings in ./Emb
 parser.add_argument('--use_deg', action='store_true')
@@ -62,7 +62,7 @@ if baseG.y.unique().shape[0] == 2:
         output_channels = baseG.y.shape[1]
     else:
         output_channels = 1
-    score_fn = metrics.binaryf1
+    score_fn = metrics.aml_metrics #metrics.binaryf1
 else:
     # multi-class classification task
     baseG.y = baseG.y.to(torch.int64)
@@ -100,8 +100,11 @@ def split():
     baseG.to(config.device)
     # split data
     trn_dataset = SubGDataset.GDataset(*baseG.get_split("train"))
-    val_dataset = SubGDataset.GDataset(*baseG.get_split("valid"))
-    tst_dataset = SubGDataset.GDataset(*baseG.get_split("test"))
+    val_dataset = SubGDataset.GDataset(*baseG.get_split("valid"))#(*baseG.get_split("test"))
+    tst_dataset = SubGDataset.GDataset(*baseG.get_split("test"))#(*baseG.get_split("valid"))
+    print("TRAIN dataset length:", len(trn_dataset))
+    print("VAL dataset length:", len(val_dataset))
+    print("TEST dataset length:", len(tst_dataset))
     # choice of dataloader
     if args.use_maxzeroone:
 
@@ -113,7 +116,7 @@ def split():
                                             drop_last=drop_last)
 
         def loader_fn(ds, bs):
-            return tfunc(ds, bs)
+            return tfunc(ds, bs, shuffle=True, drop_last=False)
 
         def tloader_fn(ds, bs):
             return tfunc(ds, bs, True, False)
@@ -134,7 +137,7 @@ def buildModel(hidden_dim, conv_layer, dropout, jk, pool, z_ratio, aggr):
         conv_layer: number of GLASSConv.
         pool: pooling function transfer node embeddings to subgraph embeddings.
         z_ratio: see GLASSConv in impl/model.py. Z_ratio in [0.5, 1].
-        aggr: aggregation method. mean, sum, or gcn. 
+        aggr: aggregation method. mean, sum, or gcn.
     '''
     conv = models.EmbZGConv(hidden_dim,
                             hidden_dim,
@@ -210,6 +213,9 @@ def test(pool="size",
         trn_loader = loader_fn(trn_dataset, batch_size)
         val_loader = tloader_fn(val_dataset, batch_size)
         tst_loader = tloader_fn(tst_dataset, batch_size)
+        print("TRAIN loader length:", len(trn_loader))
+        print("VAL loader length:", len(val_loader))
+        print("TEST loader length:", len(tst_loader))
         optimizer = Adam(gnn.parameters(), lr=lr)
         scd = lr_scheduler.ReduceLROnPlateau(optimizer,
                                              factor=resi,
@@ -224,7 +230,7 @@ def test(pool="size",
             trn_time.append(time.time() - t1)
             scd.step(loss)
 
-            if i >= 100 / num_div:
+            if i >= 0:#if i >= 100 / num_div:
                 score, _ = train.test(gnn,
                                       val_loader,
                                       score_fn,
@@ -260,9 +266,23 @@ def test(pool="size",
                 early_stop += 1
             if early_stop > 100 / num_div:
                 break
+        """
         print(
             f"end: epoch {i+1}, train time {sum(trn_time):.2f} s, val {val_score:.3f}, tst {tst_score:.3f}",
             flush=True)
+        """
+        print("\nFINAL TEST REPORT")
+        final_report = train.test_full_report(
+            gnn,
+            tst_loader,
+            metrics.aml_metrics_report,
+            loss_fn=loss_fn,
+        )
+
+        print(
+            f"end: epoch {i + 1}, train time {sum(trn_time):.2f} s, val {val_score:.3f}, tst {tst_score:.3f}",
+            flush=True)
+
         outs.append(tst_score)
     print(
         f"average {np.average(outs):.3f} error {np.std(outs) / np.sqrt(len(outs)):.3f}"
@@ -277,3 +297,6 @@ with open(f"config/{args.dataset}.yml") as f:
 print("params", params, flush=True)
 split()
 test(**(params))
+tot_time = time.time() - test_start
+print(f"\033[33mTotal runtime: {tot_time:.2f}s\033[0m")
+print(f"\033[33mTotal runtime: {tot_time/ 60:.2f}min\033[0m")

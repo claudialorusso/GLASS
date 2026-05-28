@@ -9,11 +9,12 @@ from torch_geometric.nn import GCNConv, GraphNorm, GINConv
 import functools
 import numpy as np
 from torch_geometric.data import InMemoryDataset, Data
-from torch_geometric.data.dataloader import DataLoader as pygDataloader
+from torch_geometric.loader import DataLoader as pygDataloader
 from torch_geometric.utils import k_hop_subgraph
 import torch.nn.functional as F
+import time
 
-
+test_start = time.time()
 '''
 Dataset and Dataloader class for segregated subgraph
 '''
@@ -199,7 +200,7 @@ if baseG.y.unique().shape[0] == 2:
         output_channels = baseG.y.shape[1]
     else:
         output_channels = 1
-    score_fn = metrics.binaryf1
+    score_fn = metrics.aml_metrics
 else:
     baseG.y = baseG.y.to(torch.int64)
     loss_fn = CrossEntropyLoss()
@@ -232,17 +233,34 @@ def split():
         ]
 
     global trn_dataset, val_dataset, tst_dataset, loader_fn, tloader_fn, input_channels
+
+    """
     if args.dataset in ["hpo_metab", "hpo_neuro", "ppi_bp", "em_user"]:
         baseG.addDegreeFeature()
     elif args.dataset in ["component", "coreness", "density", "cut_ratio"]:
         baseG.addOneFeature()
     else:
         raise NotImplementedError
+    """
+
+    if args.dataset == "elliptic":
+        baseG.addDegreeFeature()
+    elif args.dataset in ["hpo_metab", "hpo_neuro", "ppi_bp", "em_user"]:
+        baseG.addDegreeFeature() #default in Elliptic2 paper
+    elif args.dataset in ["component", "coreness", "density", "cut_ratio"]:
+        baseG.addOneFeature()
+    else:
+        raise NotImplementedError
+
     input_channels = baseG.x.shape[-1]
     baseG.to(config.device)
     trn_dataset = SubGDataset.GDataset(*baseG.get_split("train"))
     val_dataset = SubGDataset.GDataset(*baseG.get_split("valid"))
     tst_dataset = SubGDataset.GDataset(*baseG.get_split("test"))
+
+    print("TRAIN dataset length:", len(trn_dataset))
+    print("VAL dataset length:", len(val_dataset))
+    print("TEST dataset length:", len(tst_dataset))
 
     trn_dataset = GsDataset(todatalist(trn_dataset, 0))
     val_dataset = GsDataset(todatalist(val_dataset, 0))
@@ -252,7 +270,7 @@ def split():
         return GsDataloader(ds, bs, shuffle=shuffle, drop_last=drop_last)
 
     def loader_fn(ds, bs):
-        return tfunc(ds, bs)
+        return tfunc(ds, bs, shuffle=True, drop_last=False)
 
     def tloader_fn(ds, bs):
         return tfunc(ds, bs, False, False)
@@ -286,7 +304,7 @@ def test(hidden_dim=64, conv_layer=8, dropout=0.3, lr=1e-3, batch_size=160):
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)  
+        torch.cuda.manual_seed_all(seed)
     trn_loader = loader_fn(trn_dataset, batch_size)
     val_loader = tloader_fn(val_dataset, batch_size)
     tst_loader = tloader_fn(tst_dataset, batch_size)
@@ -338,6 +356,13 @@ def test(hidden_dim=64, conv_layer=8, dropout=0.3, lr=1e-3, batch_size=160):
                         flush=True)
                 if early_stop > 10:
                     break
+        print("\nFINAL TEST REPORT")
+        final_report = train.test_full_report(
+            gnn,
+            tst_loader,
+            metrics.aml_metrics_report,
+            loss_fn=loss_fn,
+        )
         print(f"end: val {val_score:.4f} tst {tst_score:.4f}", flush=True)
         outs.append(tst_score)
     print("tst scores", outs)
@@ -346,6 +371,11 @@ def test(hidden_dim=64, conv_layer=8, dropout=0.3, lr=1e-3, batch_size=160):
 
 
 best_hyperparams = {
+    'elliptic': {
+        'conv_layer': 2,
+        'dropout': 0.2,
+        'hidden_dim': 256 #TODO se troppo pesante metti 64 o 32
+    },
     'density': {
         'conv_layer': 1,
         'dropout': 0.4,
@@ -393,3 +423,6 @@ split()
 bhp = best_hyperparams[args.dataset]
 print(test(**(bhp), batch_size=len(tst_dataset)))
 print("best params", bhp, flush=True)
+tot_time = time.time() - test_start
+print(f"\033[33mTotal runtime: {tot_time:.2f}s\033[0m")
+print(f"\033[33mTotal runtime: {tot_time/ 60:.2f}min\033[0m")
