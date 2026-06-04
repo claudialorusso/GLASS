@@ -10,6 +10,8 @@ import numpy as np
 import time
 import random
 import yaml
+from pathlib import Path
+
 test_start = time.time()
 parser = argparse.ArgumentParser(description='')
 # Dataset settings
@@ -26,6 +28,10 @@ parser.add_argument('--use_maxzeroone', action='store_true')
 parser.add_argument('--repeat', type=int, default=1)
 parser.add_argument('--device', type=int, default=0)
 parser.add_argument('--use_seed', action='store_true')
+# new args to use checkpoints
+parser.add_argument('--resume', action='store_true')
+parser.add_argument('--checkpoint_every', type=int, default=10)
+parser.add_argument('--report_every', type=int, default=10)
 
 args = parser.parse_args()
 config.set_device(args.device)
@@ -39,6 +45,94 @@ def set_seed(seed: int):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)  # multi gpu
 
+def get_feature_tag():
+    if args.use_deg:
+        return "use_deg"
+    if args.use_one:
+        return "use_one"
+    if args.use_nodeid:
+        return "use_nodeid"
+    return "unknown_feature"
+
+
+def get_checkpoint_paths(repeat, hidden_dim, conv_layer, batch_size):
+    feature_tag = get_feature_tag()
+    ckpt_dir = Path("checkpoints") / args.dataset / feature_tag
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    base_name = (
+        f"glass_{args.dataset}_{feature_tag}"
+        f"_hidden{hidden_dim}_layers{conv_layer}"
+        f"_batch{batch_size}_repeat{repeat}"
+    )
+
+    latest_path = ckpt_dir / f"{base_name}_latest.pt"
+    best_path = ckpt_dir / f"{base_name}_best.pt"
+
+    return ckpt_dir, latest_path, best_path, base_name
+
+
+def save_training_checkpoint(
+        path,
+        iteration,
+        gnn,
+        optimizer,
+        scheduler,
+        val_score,
+        tst_score,
+        early_stop,
+        trn_time,
+        repeat,
+        extra=None
+):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path = path.with_suffix(".tmp.pt")
+
+    checkpoint = {
+        "iteration": iteration,
+        "gnn_state_dict": gnn.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "val_score": val_score,
+        "tst_score": tst_score,
+        "early_stop": early_stop,
+        "trn_time": trn_time,
+        "repeat": repeat,
+        "args": vars(args),
+        "extra": extra or {},
+    }
+
+    torch.save(checkpoint, tmp_path)
+    tmp_path.replace(path)
+
+    print(f"[CHECKPOINT] Saved checkpoint at iter {iteration}: {path}", flush=True)
+
+
+def load_training_checkpoint(path, gnn, optimizer, scheduler):
+    path = Path(path)
+
+    print(f"[CHECKPOINT] Loading checkpoint: {path}", flush=True)
+    checkpoint = torch.load(path, map_location=config.device)
+
+    gnn.load_state_dict(checkpoint["gnn_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+    start_iter = checkpoint["iteration"] + 1
+    val_score = checkpoint.get("val_score", 0)
+    tst_score = checkpoint.get("tst_score", 0)
+    early_stop = checkpoint.get("early_stop", 0)
+    trn_time = checkpoint.get("trn_time", [])
+
+    print(
+        f"[CHECKPOINT] Resuming from iter {start_iter}. "
+        f"val={val_score:.4f}, tst={tst_score:.4f}, early_stop={early_stop}",
+        flush=True
+    )
+
+    return start_iter, val_score, tst_score, early_stop, trn_time
 
 if args.use_seed:
     set_seed(0)
@@ -220,11 +314,27 @@ def test(pool="size",
         scd = lr_scheduler.ReduceLROnPlateau(optimizer,
                                              factor=resi,
                                              min_lr=5e-5)
+        ckpt_dir, latest_ckpt, best_ckpt, base_ckpt_name = get_checkpoint_paths(
+        repeat=repeat,
+        hidden_dim=hidden_dim,
+        conv_layer=conv_layer,
+        batch_size=batch_size,
+        )
         val_score = 0
         tst_score = 0
         early_stop = 0
         trn_time = []
-        for i in range(300):
+        start_iter = 0
+        if args.resume and latest_ckpt.exists():
+          start_iter, val_score, tst_score, early_stop, trn_time = load_training_checkpoint(
+            latest_ckpt,
+            gnn,
+            optimizer,
+            scd,
+          )
+        elif args.resume:
+          print(f"[CHECKPOINT] Resume requested but checkpoint not found: {latest_ckpt}", flush=True)
+        for i in range(start_iter, 300):
             t1 = time.time()
             loss = train.train(optimizer, gnn, trn_loader, loss_fn)
             trn_time.append(time.time() - t1)
@@ -247,6 +357,22 @@ def test(pool="size",
                     print(
                         f"iter {i} loss {loss:.4f} val {val_score:.4f} tst {tst_score:.4f}",
                         flush=True)
+                    save_training_checkpoint(
+                        best_ckpt,
+                        i,
+                        gnn,
+                        optimizer,
+                        scd,
+                        val_score,
+                        tst_score,
+                        early_stop,
+                        trn_time,
+                        repeat,
+                        extra={
+                            "checkpoint_type": "best_val",
+                            "loss": float(loss),
+                        }
+                    )
                 elif score >= val_score - 1e-5:
                     score, _ = train.test(gnn,
                                           tst_loader,
@@ -262,6 +388,42 @@ def test(pool="size",
                         print(
                             f"iter {i} loss {loss:.4f} val {score:.4f} tst {train.test(gnn, tst_loader, score_fn, loss_fn=loss_fn)[0]:.4f}",
                             flush=True)
+            if args.checkpoint_every > 0 and (i + 1) % args.checkpoint_every == 0:
+                save_training_checkpoint(
+                    latest_ckpt,
+                    i,
+                    gnn,
+                    optimizer,
+                    scd,
+                    val_score,
+                    tst_score,
+                    early_stop,
+                    trn_time,
+                    repeat,
+                    extra={
+                        "loss": float(loss),
+                        "hidden_dim": hidden_dim,
+                        "conv_layer": conv_layer,
+                        "batch_size": batch_size,
+                        "pool": pool,
+                        "aggr": aggr,
+                        "dropout": dropout,
+                        "jk": jk,
+                        "lr": lr,
+                        "z_ratio": z_ratio,
+                        "resi": resi,
+                    }
+                )
+
+            if args.report_every > 0 and (i + 1) % args.report_every == 0:
+                print(f"\nPERIODIC TEST REPORT - iter {i}", flush=True)
+                train.test_full_report(
+                    gnn,
+                    tst_loader,
+                    metrics.aml_metrics_report,
+                    loss_fn=loss_fn,
+                )
+
             if val_score >= 1 - 1e-5:
                 early_stop += 1
             if early_stop > 100 / num_div:
@@ -283,6 +445,23 @@ def test(pool="size",
             f"end: epoch {i + 1}, train time {sum(trn_time):.2f} s, val {val_score:.3f}, tst {tst_score:.3f}",
             flush=True)
 
+
+        final_ckpt = ckpt_dir / f"{base_ckpt_name}_final.pt"
+        save_training_checkpoint(
+            final_ckpt,
+            i,
+            gnn,
+            optimizer,
+            scd,
+            val_score,
+            tst_score,
+            early_stop,
+            trn_time,
+            repeat,
+            extra={
+                "checkpoint_type": "final",
+            }
+        )
         outs.append(tst_score)
     print(
         f"average {np.average(outs):.3f} error {np.std(outs) / np.sqrt(len(outs)):.3f}"
